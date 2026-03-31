@@ -1,0 +1,27 @@
+## IDF Component Manager Manifest File
+version: "1.0.0"
+description: >
+  Standalone ESP-IDF captive portal component. Registers all standard OS
+  captive-portal detection endpoints on an esp_http_server instance and
+  redirects clients to the device's built-in web interface with a single
+  function call. Supports iOS, macOS, Android, Windows, Firefox, and Chrome.
+url: "https://github.com/Nordesems/esp-captive-portal"
+repository: "https://github.com/Nordesems/esp-captive-portal.git"
+
+targets:
+  - esp32
+  - esp32s2
+  - esp32s3
+  - esp32c3
+  - esp32c6
+  - esp32h2
+
+tags:
+  - wifi
+  - http
+  - captive-portal
+  - networking
+
+dependencies:
+  idf:
+    version: ">=5.0.0"
