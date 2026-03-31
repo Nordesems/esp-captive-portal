@@ -7,7 +7,7 @@ description: >
   function call. Supports iOS, macOS, Android, Windows, Firefox, and Chrome.
 url: "https://github.com/Nordesems/esp-captive-portal"
 repository: "https://github.com/Nordesems/esp-captive-portal.git"
-
+license: "MIT"
 targets:
   - esp32
   - esp32s2
