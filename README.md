@@ -1,4 +1,4 @@
-# esp_captive_portal
+# esp-captive-portal
 
 A standalone, zero-dependency ESP-IDF component that implements a **captive portal** for Wi-Fi AP mode. After a single function call, any device that connects to your ESP32 soft-AP (iOS, macOS, Android, Windows, Firefox, Chrome) will automatically be redirected to your device's built-in web interface.
 
