@@ -26,16 +26,16 @@ Install directly from the Espressif Component Registry using the command-line.
 
 - Using the `esp` CLI:
 ```
-esp component install esp_captive_portal
+esp component install nordesems/esp-captive-portal
 ```
 
 - Or using `idf.py` component manager:
 ```
-idf.py add-dependency 'esp_captive_portal:>=1.0.0'
+idf.py add-dependency "nordesems/esp-captive-portal^1.0.0"
 idf.py update-dependencies
 ```
 
-**Or use the included ESP-IDF component registery GUI, search for `esp_captive_portal` and install.**
+**Or use the included ESP-IDF component registery GUI, search for `esp-captive-portal` and install.**
 
 Espressif's tooling will fetch and install the component into your project.
 
@@ -45,7 +45,7 @@ Add to your `main/idf_component.yml`:
 
 ```yaml
 dependencies:
-  esp_captive_portal: ">=1.0.0"
+  esp-captive-portal: ">=1.0.0"
 ```
 
 Then run:
@@ -59,7 +59,7 @@ idf.py update-dependencies
 ```
 your_project/
 ├── components/
-│   └── esp_captive_portal/   ← copy this folder here
+│   └── esp-captive-portal/   ← copy this folder here
 ├── main/
 └── CMakeLists.txt
 ```
