@@ -2,18 +2,18 @@
 
 A standalone, zero-dependency ESP-IDF component that implements a **captive portal** for Wi-Fi AP mode. After a single function call, any device that connects to your ESP32 soft-AP (iOS, macOS, Android, Windows, Firefox, Chrome) will automatically be redirected to your device's built-in web interface.
 
->**NOTE** Some devices DO NOT support captive portal for security reasonsm this is the only limitation!
+>**NOTE** Some devices DO NOT support captive portal for security reasons - this is the only limitation!
 
 ---
 
 ## Features
 
-- **Single function call** — works immediately after `httpd_start()`
+- **Single function call** — works immediately after `httpd_start()`; DNS server lifecycle is fully automatic
+- **Built-in DNS server** — intercepts all DNS queries and redirects them to the AP IP, triggering captive portal detection on every OS
 - **Automatic IP detection** — reads the AP interface IP at request time; survives runtime IP changes
-- **All major OS probes handled** — iOS/macOS, Android, Windows/Xbox, Firefox, Chrome/Chromium
+- **All major OS probes handled** — iOS/macOS, Android, Windows/Xbox, Firefox, Chrome/Chromium (11 endpoints)
 - **HTTP 302 redirect** — with meta-refresh and JS fallback for older clients
 - **Fully configurable** via Kconfig or runtime `captive_portal_config_t`
-- **No external dependencies** — only ESP-IDF built-in components (`esp_http_server`, `esp_netif`, `log`)
 - **Idempotent registration** — safe to call after an HTTP server restart
 
 ---
@@ -98,7 +98,9 @@ httpd_register_uri_handler(server, &my_main_page);
 httpd_register_uri_handler(server, &my_api_endpoint);
 ```
 
-That's it. All captive portal probes are now intercepted.
+That's it. The component handles everything:
+- All OS captive-portal HTTP probe URIs are registered and redirect to the device web interface.
+- A UDP DNS server is started automatically when the soft-AP comes up (`WIFI_EVENT_AP_START`) and stopped when it goes down (`WIFI_EVENT_AP_STOP`). No additional calls are needed.
 
 ---
 
@@ -197,10 +199,11 @@ esp_err_t captive_portal_register(httpd_handle_t server,
 
 ## Requirements
 
-| Requirement | Version |
-|-------------|---------|
-| ESP-IDF     | ≥ 5.0   |
+| Requirement | Detail |
+|-------------|--------|
+| ESP-IDF     | ≥ 5.0  |
 | ESP32 target | esp32, esp32s2, esp32s3, esp32c3, esp32c6, esp32h2 |
+| IDF components | `esp_http_server`, `esp_netif`, `esp_event`, `esp_wifi`, `freertos`, `lwip`, `log` |
 
 ---
 
@@ -211,6 +214,10 @@ MIT License. See [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### 1.1.0 (2026-04-07)
+- Added built-in UDP DNS server (port 53) — all DNS queries answered with the AP IP address
+- DNS server lifecycle fully automatic: starts on `WIFI_EVENT_AP_START`, stops on `WIFI_EVENT_AP_STOP`
 
 ### 1.0.0 (2026-03-25)
 - Initial release

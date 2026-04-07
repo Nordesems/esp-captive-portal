@@ -3,15 +3,21 @@
  * @brief Standalone captive portal component for ESP-IDF.
  * @author Ahmed Al-Tameemi, Nordes Sp. z o. o.
  *
- * Registers the standard OS captive-portal detection endpoints on a running
- * ESP-IDF HTTP server (esp_http_server). A 302 redirect to the device's local
- * web interface is returned for every probe request, causing iOS, macOS,
- * Android, Windows, and Firefox to automatically display the built-in
- * configuration page when a user connects to the device's Wi-Fi AP.
+ * Provides two complementary captive portal mechanisms:
  *
- * Detected OS probe endpoints:
+ *   1. HTTP redirect handlers – registers the standard OS captive-portal
+ *      detection endpoints on a running ESP-IDF HTTP server.  A 302 redirect
+ *      to the device's local web interface is returned for every probe request,
+ *      causing iOS, macOS, Android, Windows, and Firefox to automatically
+ *      display the built-in configuration page when a user connects to the device's Wi-Fi AP.
+ *
+ *   2. DNS server – listens on UDP port 53 and answers every DNS A-record
+ *      query with the soft-AP IP address, ensuring connected clients resolve
+ *      all hostnames to the device and triggering the OS captive-portal flow.
+ *
+ * Detected OS probe endpoints (HTTP):
  *   - iOS / macOS : /hotspot-detect.html, /library/test/success.html
- *   - Android     : /generate_204, /gen_204
+ *   - Android     : /generate_204, /generate204, /gen_204
  *   - Windows     : /connecttest.txt, /ncsi.txt, /wpad.dat
  *   - Firefox     : /success.txt
  *   - Generic     : /redirect, /browsernetworktime/[wildcard]
@@ -19,7 +25,7 @@
  * Minimal usage (Kconfig defaults):
  * @code
  *   httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
- *   cfg.uri_match_fn = httpd_uri_match_wildcard;  // required for wildcard URI /browsernetworktime/
+ *   cfg.uri_match_fn = httpd_uri_match_wildcard;  // required for /browsernetworktime/
  *   httpd_handle_t server = NULL;
  *   httpd_start(&server, &cfg);
  *
@@ -115,7 +121,10 @@ typedef struct {
  *
  * @note  Call this function once, immediately after @c httpd_start() and
  *        before registering your application-specific URI handlers, to
- *        ensure portal probes are intercepted reliably.
+ *        ensure portal probes are intercepted reliably.  The DNS server is
+ *        started automatically and its lifecycle is tied to the Wi-Fi soft-AP
+ *        (WIFI_EVENT_AP_START / WIFI_EVENT_AP_STOP) — no further calls are
+ *        needed.
  *
  * @param server  A valid @c httpd_handle_t returned by @c httpd_start().
  *                Must not be NULL.
@@ -123,7 +132,8 @@ typedef struct {
  *                Kconfig compile-time defaults for all fields.
  *
  * @return
- *   - @c ESP_OK              – All handlers registered successfully.
+ *   - @c ESP_OK              – All handlers registered successfully and DNS
+ *                              server started.
  *   - @c ESP_ERR_INVALID_ARG – @p server is NULL.
  *   - @c ESP_FAIL            – One or more handler registrations failed
  *                              (details logged at ERROR level).
