@@ -47,7 +47,8 @@ static const char *TAG = "captive_portal";
 
 /* --------------------------------------------------------------------------
  * Module-static configuration
- * Populated once by captive_portal_register(); read by the handler task.
+ * Populated by captive_portal_apply_config() on every registration call.
+ * Read by the HTTP handler and DNS task.
  * -------------------------------------------------------------------------- */
 static struct {
     char     redirect_url[128]; /*!< Non-empty: fixed URL. Empty: auto-detect. */
@@ -208,6 +209,35 @@ static const httpd_uri_t s_portal_uris[] = {
 };
 
 #define NUM_PORTAL_URIS  (sizeof(s_portal_uris) / sizeof(s_portal_uris[0]))
+
+/* --------------------------------------------------------------------------
+ * Wildcard catch-all URI table
+ *
+ * Registered by captive_portal_register_catchall() AFTER all application
+ * handlers.  Catches every URI not matched by a previously registered handler.
+ *
+ * IMPORTANT: httpd evaluates URI handlers in registration order; the first
+ * match wins.  Registering these before application handlers would intercept
+ * all application traffic.  captive_portal_register_catchall() must therefore
+ * be called last, after httpd_register_uri_handler() for all app routes.
+ *
+ * Note: requires httpd_config_t.uri_match_fn = httpd_uri_match_wildcard
+ * (same requirement as /browsernetworktime/\* above; if the user followed
+ * the Quick Start this is already set).
+ *
+ * Only GET and HEAD are registered.  These account for virtually all
+ * background OS / browser traffic that generates unmatched connections.
+ * POST and other methods to unknown URIs are rare from OS captive-portal
+ * detection; they do not contribute measurably to socket exhaustion.
+ * -------------------------------------------------------------------------- */
+static const httpd_uri_t s_catchall_uris[] = {
+    { .uri = "/*", .method = HTTP_GET,
+      .handler = captive_portal_http_handler, .user_ctx = NULL },
+    { .uri = "/*", .method = HTTP_HEAD,
+      .handler = captive_portal_http_handler, .user_ctx = NULL },
+};
+
+#define NUM_CATCHALL_URIS  (sizeof(s_catchall_uris) / sizeof(s_catchall_uris[0]))
 
 /* --------------------------------------------------------------------------
  * DNS server (captive portal redirect for raw DNS queries)
@@ -475,9 +505,10 @@ static void captive_portal_dns_signal_stop(void)
 /* --------------------------------------------------------------------------
  * Wi-Fi AP lifecycle event handler
  *
- * Registered once by captive_portal_register().  Starts and stops the DNS
- * server in lock-step with the Wi-Fi soft-AP so the caller never needs to
- * manage the DNS lifecycle explicitly.
+ * Registered once (by the first registration function called) via
+ * captive_portal_enable_dns().  Starts and stops the DNS server in
+ * lock-step with the Wi-Fi soft-AP so the caller never needs to manage
+ * the DNS lifecycle explicitly.
  * -------------------------------------------------------------------------- */
 
 /** Guard ensuring the Wi-Fi event handler is registered at most once. */
@@ -514,18 +545,24 @@ static void captive_portal_wifi_event_handler(void *arg,
 }
 
 /* --------------------------------------------------------------------------
- * Public API
+ * Public API helpers
  * -------------------------------------------------------------------------- */
 
-esp_err_t captive_portal_register(httpd_handle_t server,
-                                  const captive_portal_config_t *config)
+/**
+ * @brief Apply caller-supplied configuration into the module-static s_cfg store.
+ *
+ * Extracts effective values from @p config (falling back to Kconfig defaults
+ * for any NULL / zero field) and copies them into @c s_cfg so that the HTTP
+ * handler task and DNS task can read them without receiving additional
+ * parameters.
+ *
+ * Must be called inside every public registration function before the handler
+ * registration loop and before captive_portal_enable_dns().
+ *
+ * @param config  Runtime configuration, or NULL to use all Kconfig defaults.
+ */
+static void captive_portal_apply_config(const captive_portal_config_t *config)
 {
-    if (server == NULL) {
-        ESP_LOGE(TAG, "captive_portal_register: server handle is NULL");
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    /* ---- Resolve effective configuration --------------------------------- */
     const char *eff_url  = NULL;
     const char *eff_key  = CONFIG_CAPTIVE_PORTAL_NETIF_KEY;
     uint16_t    eff_port = (uint16_t)(CONFIG_CAPTIVE_PORTAL_REDIRECT_PORT);
@@ -536,7 +573,6 @@ esp_err_t captive_portal_register(httpd_handle_t server,
         if (config->redirect_port != 0U)   { eff_port = config->redirect_port; }
     }
 
-    /* Copy into module-static storage (safe for handler access from any task). */
     if (eff_url != NULL) {
         strlcpy(s_cfg.redirect_url, eff_url, sizeof(s_cfg.redirect_url));
     } else {
@@ -544,29 +580,21 @@ esp_err_t captive_portal_register(httpd_handle_t server,
     }
     strlcpy(s_cfg.netif_key, eff_key, sizeof(s_cfg.netif_key));
     s_cfg.redirect_port = eff_port;
+}
 
-    /* ---- Register URI handlers ------------------------------------------- */
-    esp_err_t result = ESP_OK;
-
-    for (size_t i = 0; i < NUM_PORTAL_URIS; i++) {
-        esp_err_t err = httpd_register_uri_handler(server, &s_portal_uris[i]);
-        if (err == ESP_ERR_HTTPD_HANDLER_EXISTS) {
-            /* Handler already registered - treat as success (idempotent call). */
-            ESP_LOGW(TAG, "URI '%s' already registered, skipping",
-                     s_portal_uris[i].uri);
-        } else if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to register URI '%s': %s",
-                     s_portal_uris[i].uri, esp_err_to_name(err));
-            result = ESP_FAIL;
-        }
-    }
-
-    if (result == ESP_OK) {
-        ESP_LOGI(TAG, "Captive portal ready (%zu URIs, netif: '%s')",
-                 NUM_PORTAL_URIS, s_cfg.netif_key);
-    }
-
-    /* ---- Register Wi-Fi AP events for automatic DNS lifecycle ------------ */
+/**
+ * @brief Register Wi-Fi AP event handlers and start the DNS server if the AP
+ *        interface is already up.
+ *
+ * Idempotent: the Wi-Fi event handlers are registered at most once regardless
+ * of how many times this function is called.  captive_portal_dns_start() also
+ * guards against double-start internally.
+ *
+ * Must be called after captive_portal_apply_config() so that s_cfg.netif_key
+ * is valid for the esp_netif_is_netif_up() check.
+ */
+static void captive_portal_enable_dns(void)
+{
     if (!s_event_handler_registered) {
         esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_START,
                                    captive_portal_wifi_event_handler, NULL);
@@ -575,13 +603,281 @@ esp_err_t captive_portal_register(httpd_handle_t server,
         s_event_handler_registered = true;
     }
 
-    /* Start DNS only if the soft-AP interface is already up.
-     * If the AP is not yet up the Wi-Fi event handler will start DNS
-     * on WIFI_EVENT_AP_START. */
     esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey(s_cfg.netif_key);
     if (ap_netif != NULL && esp_netif_is_netif_up(ap_netif)) {
         captive_portal_dns_start();
     }
 
-    return result;
+    ESP_LOGI(TAG, "Captive portal ready (netif: '%s', port: %u)",
+             s_cfg.netif_key, (unsigned)s_cfg.redirect_port);
+}
+
+/* --------------------------------------------------------------------------
+ * Public API
+ * -------------------------------------------------------------------------- */
+
+/**
+ * @brief Register all specific captive-portal probe URIs and start DNS (advanced API).
+ *
+ * Registers the complete set of 11 OS captive-portal detection endpoints
+ * individually, applies configuration, and enables automatic DNS lifecycle
+ * management (Wi-Fi AP start/stop events + immediate start if the AP is
+ * already up).
+ *
+ * Must be called AFTER all application URI handlers have been registered,
+ * consistent with the other two public registration functions.
+ *
+ * @param server  A valid @c httpd_handle_t returned by @c httpd_start().
+ *                Must not be NULL.
+ * @param config  Pointer to a configuration struct, or NULL to use the
+ *                Kconfig compile-time defaults for all fields.
+ *
+ * @return
+ *   - @c ESP_OK                      – All probe handlers registered and DNS active.
+ *   - @c ESP_ERR_INVALID_ARG         – @p server is NULL.
+ *   - @c ESP_ERR_HTTPD_HANDLERS_FULL – Handler table is full; increase
+ *                                      @c httpd_config_t.max_uri_handlers.
+ *   - @c ESP_FAIL                    – An unexpected registration error occurred.
+ */
+esp_err_t captive_portal_register_uris(httpd_handle_t server,
+                                       const captive_portal_config_t *config)
+{
+    if (server == NULL) {
+        ESP_LOGE(TAG, "captive_portal_register_uris: server handle is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    captive_portal_apply_config(config);
+
+    for (size_t i = 0; i < NUM_PORTAL_URIS; i++) {
+        esp_err_t err = httpd_register_uri_handler(server, &s_portal_uris[i]);
+        if (err == ESP_ERR_HTTPD_HANDLER_EXISTS) {
+            ESP_LOGW(TAG, "URI '%s' already registered, skipping",
+                     s_portal_uris[i].uri);
+        } else if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to register URI '%s': %s",
+                     s_portal_uris[i].uri, esp_err_to_name(err));
+            return err;
+        }
+    }
+
+    ESP_LOGI(TAG, "Captive portal: registered %zu specific probe URI handlers",
+             NUM_PORTAL_URIS);
+    captive_portal_enable_dns();
+    return ESP_OK;
+}
+
+/**
+ * @brief Register the wildcard catch-all URI handlers (HTTP only, no DNS).
+ *
+ * Internal helper used by captive_portal_register_catchall() (public) and as
+ * the fallback path inside captive_portal_register_http().  Registers @c /\*
+ * handlers for GET and HEAD without touching configuration or DNS.
+ *
+ * Registration is atomic: if the HEAD handler cannot be registered after the
+ * GET handler was already registered, the GET handler is removed and the error
+ * is returned, leaving the server in its original state.
+ *
+ * @param server  A valid, non-NULL @c httpd_handle_t (caller must verify).
+ *
+ * @return @c ESP_OK on success, @c ESP_ERR_HTTPD_HANDLERS_FULL if the URI
+ *         table is full, or another esp_err_t on unexpected failure.
+ */
+static esp_err_t captive_portal_register_catchall_http(httpd_handle_t server)
+{
+    bool registered[NUM_CATCHALL_URIS] = {0};
+
+    for (size_t i = 0; i < NUM_CATCHALL_URIS; i++) {
+        esp_err_t err = httpd_register_uri_handler(server, &s_catchall_uris[i]);
+        if (err == ESP_OK) {
+            registered[i] = true;
+        } else if (err == ESP_ERR_HTTPD_HANDLER_EXISTS) {
+            ESP_LOGW(TAG, "Catch-all handler for method %d already registered, skipping",
+                     (int)s_catchall_uris[i].method);
+        } else {
+            ESP_LOGE(TAG, "Failed to register catch-all handler (method %d): %s",
+                     (int)s_catchall_uris[i].method, esp_err_to_name(err));
+            /* Atomic rollback: remove any handler registered in this call. */
+            for (size_t j = 0; j < i; j++) {
+                if (registered[j]) {
+                    httpd_unregister_uri_handler(server,
+                                                 s_catchall_uris[j].uri,
+                                                 s_catchall_uris[j].method);
+                }
+            }
+            return err;
+        }
+    }
+
+    ESP_LOGI(TAG, "Captive portal: catch-all mode — unmatched URIs will redirect to portal");
+    return ESP_OK;
+}
+
+/**
+ * @brief Register wildcard catch-all URI handlers and start DNS (advanced API).
+ *
+ * Registers @c /\* handlers for GET and HEAD, applies configuration, and
+ * enables automatic DNS lifecycle management (Wi-Fi AP start/stop events +
+ * immediate start if the AP is already up).
+ *
+ * Requests not matched by any previously registered handler are redirected to
+ * the portal and the socket is closed immediately, preventing ENFILE
+ * exhaustion from background OS and browser traffic.
+ *
+ * Must be called AFTER all application URI handlers so that the wildcard does
+ * not shadow application routes.
+ *
+ * @param server  A valid @c httpd_handle_t returned by @c httpd_start().
+ *                Must not be NULL.
+ * @param config  Pointer to a configuration struct, or NULL to use the
+ *                Kconfig compile-time defaults for all fields.
+ *
+ * @return
+ *   - @c ESP_OK                      – Catch-all handlers registered and DNS active.
+ *   - @c ESP_ERR_INVALID_ARG         – @p server is NULL.
+ *   - @c ESP_ERR_HTTPD_HANDLERS_FULL – URI table is full.
+ *   - @c ESP_FAIL                    – Unexpected registration error.
+ */
+esp_err_t captive_portal_register_catchall(httpd_handle_t server,
+                                           const captive_portal_config_t *config)
+{
+    if (server == NULL) {
+        ESP_LOGE(TAG, "captive_portal_register_catchall: server handle is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    captive_portal_apply_config(config);
+
+    esp_err_t ret = captive_portal_register_catchall_http(server);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    captive_portal_enable_dns();
+    return ESP_OK;
+}
+
+/**
+ * @brief Auto-select and apply the HTTP handler registration strategy.
+ *
+ * Attempts to register all specific probe URI handlers one by one.  If the
+ * httpd handler table is exhausted before all can be registered, any
+ * partially registered handlers are rolled back atomically, and the function
+ * falls back to the wildcard catch-all strategy instead.
+ *
+ * The available slot count acts as an implicit signal of the deployment role:
+ *   - Servers that have raised @c max_uri_handlers and retain enough free
+ *     slots receive specific URI matching.  This is preferable for devices
+ *     that also serve application content, because a @c /\* wildcard could
+ *     otherwise intercept requests intended for application routes.
+ *   - Servers operating on the default 8-slot configuration (or with limited
+ *     remaining slots) automatically receive the wildcard catch-all.  This is
+ *     equally effective for pure captive-portal deployments and uses only two
+ *     handler slots.
+ *
+ * @param server  Validated httpd handle (caller guarantees non-NULL).
+ *
+ * @return @c ESP_OK on success, or the error returned by the failing
+ *         @c httpd_register_uri_handler call.
+ */
+static esp_err_t captive_portal_register_http(httpd_handle_t server)
+{
+    bool registered[NUM_PORTAL_URIS] = {0};
+    bool slots_full = false;
+
+    for (int i = 0; i < (int)NUM_PORTAL_URIS; i++) {
+        esp_err_t err = httpd_register_uri_handler(server, &s_portal_uris[i]);
+        if (err == ESP_OK) {
+            registered[i] = true;
+        } else if (err == ESP_ERR_HTTPD_HANDLER_EXISTS) {
+            /* Already registered by a previous call or the user — skip. */
+            ESP_LOGD(TAG, "URI '%s' already registered, skipping", s_portal_uris[i].uri);
+        } else if (err == ESP_ERR_HTTPD_HANDLERS_FULL) {
+            slots_full = true;
+            break;
+        } else {
+            ESP_LOGE(TAG, "URI '%s' registration error: %s",
+                     s_portal_uris[i].uri, esp_err_to_name(err));
+            /* Atomic rollback of everything we registered in this call. */
+            for (int j = 0; j < (int)NUM_PORTAL_URIS; j++) {
+                if (registered[j]) {
+                    httpd_unregister_uri_handler(server,
+                                                 s_portal_uris[j].uri,
+                                                 s_portal_uris[j].method);
+                }
+            }
+            return err;
+        }
+    }
+
+    if (!slots_full) {
+        int n = 0;
+        for (int i = 0; i < (int)NUM_PORTAL_URIS; i++) {
+            if (registered[i]) { n++; }
+        }
+        ESP_LOGI(TAG, "Captive portal: specific URI mode (%d probe handlers registered)", n);
+        return ESP_OK;
+    }
+
+    /* --- Handler table full: roll back partial registrations and fall back -- */
+    {
+        int n_partial = 0;
+        for (int i = 0; i < (int)NUM_PORTAL_URIS; i++) {
+            if (registered[i]) { n_partial++; }
+        }
+        ESP_LOGW(TAG,
+                 "Captive portal: URI table full after %d/%zu handlers — "
+                 "rolling back and switching to wildcard catch-all mode",
+                 n_partial, NUM_PORTAL_URIS);
+    }
+
+    for (int j = 0; j < (int)NUM_PORTAL_URIS; j++) {
+        if (registered[j]) {
+            httpd_unregister_uri_handler(server,
+                                         s_portal_uris[j].uri,
+                                         s_portal_uris[j].method);
+        }
+    }
+
+    return captive_portal_register_catchall_http(server);
+}
+
+/**
+ * @brief Register the captive portal using automatic HTTP strategy selection.
+ *
+ * Applies runtime configuration, selects either specific URI mode or
+ * catch-all mode based on available handler slots, then enables automatic DNS
+ * lifecycle management tied to Wi-Fi AP start/stop events.
+ *
+ * Expected call order is after all application URI handlers are registered.
+ * This ensures that, when fallback catch-all mode is selected, the wildcard
+ * route remains last and does not shadow application routes.
+ *
+ * @param server  Active HTTP server handle. Must not be NULL.
+ * @param config  Optional runtime configuration. NULL uses Kconfig defaults.
+ *
+ * @return
+ *   - @c ESP_OK                      on success.
+ *   - @c ESP_ERR_INVALID_ARG         if @p server is NULL.
+ *   - @c ESP_ERR_HTTPD_HANDLERS_FULL if no URI slots are available even for
+ *                                     catch-all fallback mode.
+ *   - Other @c esp_err_t values propagated from httpd URI registration APIs.
+ */
+esp_err_t captive_portal_register(httpd_handle_t server,
+                                  const captive_portal_config_t *config)
+{
+    if (server == NULL) {
+        ESP_LOGE(TAG, "captive_portal_register: server handle is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    captive_portal_apply_config(config);
+
+    esp_err_t result = captive_portal_register_http(server);
+    if (result != ESP_OK) {
+        return result;
+    }
+
+    captive_portal_enable_dns();
+    return ESP_OK;
 }

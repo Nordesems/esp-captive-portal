@@ -25,11 +25,15 @@
  * Minimal usage (Kconfig defaults):
  * @code
  *   httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
- *   cfg.uri_match_fn = httpd_uri_match_wildcard;  // required for /browsernetworktime/
+ *   cfg.uri_match_fn    = httpd_uri_match_wildcard;  // required for /browsernetworktime/
  *   httpd_handle_t server = NULL;
  *   httpd_start(&server, &cfg);
  *
- *   captive_portal_register(server, NULL);   // NULL = use Kconfig defaults
+ *   // Register your application handlers first (if any)
+ *   httpd_register_uri_handler(server, &my_page);
+ *
+ *   // Register the captive portal last — it auto-selects the best strategy
+ *   captive_portal_register(server, NULL);
  * @endcode
  *
  * Custom redirect URL:
@@ -105,26 +109,32 @@ typedef struct {
 }
 
 /**
- * @brief Register all standard captive-portal detection URI handlers on a
- *        running ESP-IDF HTTP server.
+ * @brief Register the captive portal on a running HTTP server (recommended API).
  *
- * Each registered handler issues an HTTP 302 redirect to the device's local
- * web interface. The redirect target is resolved in order:
- *   1. @c config->redirect_url  (if non-NULL, used verbatim)
- *   2. IP auto-detected at request time from the @c config->netif_key netif
- *   3. @c CONFIG_CAPTIVE_PORTAL_FALLBACK_IP  (compile-time Kconfig fallback)
+ * This is the primary single-call API. It applies a reliable auto-selection
+ * strategy for HTTP URI registration and then starts DNS lifecycle management.
  *
- * @note  The @c /browsernetworktime/ URI (registered with a trailing wildcard) requires wildcard URI matching.
- *        Set @c httpd_config_t.uri_match_fn = httpd_uri_match_wildcard
- *        before calling @c httpd_start(). Registration of this URI will
- *        still succeed without wildcard matching but requests will not match.
+ * Registration strategy:
+ *   1. Try registering all 11 specific probe URIs.
+ *   2. If the HTTP server reports @c ESP_ERR_HTTPD_HANDLERS_FULL before all
+ *      11 fit, roll back any partial registrations from this call and fall
+ *      back to wildcard catch-all mode (@c /\* for GET and HEAD).
  *
- * @note  Call this function once, immediately after @c httpd_start() and
- *        before registering your application-specific URI handlers, to
- *        ensure portal probes are intercepted reliably.  The DNS server is
- *        started automatically and its lifecycle is tied to the Wi-Fi soft-AP
- *        (WIFI_EVENT_AP_START / WIFI_EVENT_AP_STOP) — no further calls are
- *        needed.
+ * This lets the component adapt to both common deployment styles:
+ *   - Default constrained servers (@c HTTPD_DEFAULT_CONFIG() with
+ *     @c max_uri_handlers = 8): catch-all mode is selected automatically.
+ *   - Servers with expanded URI capacity: specific URI mode is selected,
+ *     preserving normal behavior for broader application traffic.
+ *
+ * After HTTP strategy selection this function also:
+ *   - Registers Wi-Fi AP start/stop event handlers (once) to manage DNS.
+ *   - Starts DNS immediately if the AP netif is already up.
+ *
+ * @note  Must be called after all application URI handlers are registered.
+ *        This allows wildcard fallback mode (if selected) to remain last.
+ *
+ * @note  Requires wildcard URI matching:
+ *        @c httpd_config_t.uri_match_fn = httpd_uri_match_wildcard
  *
  * @param server  A valid @c httpd_handle_t returned by @c httpd_start().
  *                Must not be NULL.
@@ -132,14 +142,77 @@ typedef struct {
  *                Kconfig compile-time defaults for all fields.
  *
  * @return
- *   - @c ESP_OK              – All handlers registered successfully and DNS
- *                              server started.
- *   - @c ESP_ERR_INVALID_ARG – @p server is NULL.
- *   - @c ESP_FAIL            – One or more handler registrations failed
- *                              (details logged at ERROR level).
+ *   - @c ESP_OK                      – Registration strategy applied and DNS
+ *                                      lifecycle management active.
+ *   - @c ESP_ERR_INVALID_ARG         – @p server is NULL.
+ *   - @c ESP_ERR_HTTPD_HANDLERS_FULL – Even fallback catch-all could not be
+ *                                      registered due to URI table exhaustion.
+ *   - @c ESP_FAIL                    – Unexpected registration error.
  */
 esp_err_t captive_portal_register(httpd_handle_t server,
                                   const captive_portal_config_t *config);
+
+/**
+ * @brief Register all known captive-portal probe URIs and start DNS (advanced API).
+ *
+ * Registers the complete specific URI probe set (11 endpoints), applies
+ * configuration, and enables automatic DNS lifecycle management tied to
+ * Wi-Fi AP start/stop events (same as @c captive_portal_register(), but
+ * with an explicit specific-URI strategy instead of auto-selection).
+ *
+ * Use this API when your server has enough free URI slots and you want
+ * explicit specific-URI mode instead of auto-selection.  For automatic
+ * strategy selection, prefer @c captive_portal_register().
+ *
+ * @note  Must be called after all application URI handlers.
+ *
+ * @note  Requires wildcard URI matching for @c /browsernetworktime/\*:
+ *        @c httpd_config_t.uri_match_fn = httpd_uri_match_wildcard
+ *
+ * @param server  A valid @c httpd_handle_t returned by @c httpd_start().
+ *                Must not be NULL.
+ * @param config  Pointer to a configuration struct, or NULL to use the
+ *                Kconfig compile-time defaults for all fields.
+ *
+ * @return
+ *   - @c ESP_OK                      – All probe handlers registered and DNS active.
+ *   - @c ESP_ERR_INVALID_ARG         – @p server is NULL.
+ *   - @c ESP_ERR_HTTPD_HANDLERS_FULL – URI table is full.
+ *   - @c ESP_FAIL                    – Unexpected registration error.
+ */
+esp_err_t captive_portal_register_uris(httpd_handle_t server,
+                                       const captive_portal_config_t *config);
+
+/**
+ * @brief Register wildcard catch-all URI handlers and start DNS (advanced API).
+ *
+ * Registers @c /\* handlers for GET and HEAD, applies configuration, and
+ * enables automatic DNS lifecycle management tied to Wi-Fi AP start/stop
+ * events (same as @c captive_portal_register(), but with an explicit
+ * catch-all strategy instead of auto-selection).
+ *
+ * Requests not matched by any previously registered handler are redirected
+ * to the portal and the socket is closed immediately, preventing ENFILE
+ * exhaustion from background OS and browser traffic.
+ *
+ * Must be called AFTER all application URI handlers so that the wildcard
+ * does not shadow application routes.
+ *
+ * @note  Requires @c httpd_config_t.uri_match_fn = httpd_uri_match_wildcard.
+ *
+ * @param server  A valid @c httpd_handle_t returned by @c httpd_start().
+ *                Must not be NULL.
+ * @param config  Pointer to a configuration struct, or NULL to use the
+ *                Kconfig compile-time defaults for all fields.
+ *
+ * @return
+ *   - @c ESP_OK                      – Catch-all handlers registered and DNS active.
+ *   - @c ESP_ERR_INVALID_ARG         – @p server is NULL.
+ *   - @c ESP_ERR_HTTPD_HANDLERS_FULL – URI table is full.
+ *   - @c ESP_FAIL                    – Unexpected registration error.
+ */
+esp_err_t captive_portal_register_catchall(httpd_handle_t server,
+                                           const captive_portal_config_t *config);
 
 #ifdef __cplusplus
 }
