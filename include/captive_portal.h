@@ -5,6 +5,10 @@
  *
  * Provides two complementary captive portal mechanisms:
  *
+ *   0. DHCP Option 114 (RFC 8910) - advertises the captive portal URI in
+ *      DHCP offers/acks so supporting clients can discover the portal without
+ *      probe heuristics.
+ *
  *   1. HTTP redirect handlers – registers the standard OS captive-portal
  *      detection endpoints on a running ESP-IDF HTTP server.  A 302 redirect
  *      to the device's local web interface is returned for every probe request,
@@ -113,6 +117,8 @@ typedef struct {
  *
  * This is the primary single-call API. It applies a reliable auto-selection
  * strategy for HTTP URI registration and then starts DNS lifecycle management.
+ * Before HTTP URI registration, this API also applies DHCP Option 114 (if
+ * enabled in Kconfig) so DHCP-aware clients can use that signal first.
  *
  * Registration strategy:
  *   1. Try registering all 11 specific probe URIs.
@@ -156,7 +162,8 @@ esp_err_t captive_portal_register(httpd_handle_t server,
  * @brief Register all known captive-portal probe URIs and start DNS (advanced API).
  *
  * Registers the complete specific URI probe set (11 endpoints), applies
- * configuration, and enables automatic DNS lifecycle management tied to
+ * configuration, applies DHCP Option 114 (if enabled), and enables automatic
+ * DNS lifecycle management tied to
  * Wi-Fi AP start/stop events (same as @c captive_portal_register(), but
  * with an explicit specific-URI strategy instead of auto-selection).
  *
@@ -187,7 +194,8 @@ esp_err_t captive_portal_register_uris(httpd_handle_t server,
  * @brief Register wildcard catch-all URI handlers and start DNS (advanced API).
  *
  * Registers @c /\* handlers for GET and HEAD, applies configuration, and
- * enables automatic DNS lifecycle management tied to Wi-Fi AP start/stop
+ * applies DHCP Option 114 (if enabled), and enables automatic DNS lifecycle
+ * management tied to Wi-Fi AP start/stop
  * events (same as @c captive_portal_register(), but with an explicit
  * catch-all strategy instead of auto-selection).
  *

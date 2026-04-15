@@ -9,6 +9,7 @@ A standalone, zero-dependency ESP-IDF component that implements a **captive port
 ## Features
 
 - **Single function call** — call once after registering your app handlers; DNS server lifecycle is fully automatic
+- **DHCP Option 114 (RFC 8910)** — advertises captive portal URI in DHCP (enabled by default)
 - **Built-in DNS server** — intercepts all DNS queries and redirects them to the AP IP, triggering captive portal detection on every OS
 - **Automatic IP detection** — reads the AP interface IP at request time; survives runtime IP changes
 - **All major OS probes handled** — iOS/macOS, Android, Windows/Xbox, Firefox, Chrome/Chromium (11 endpoints)
@@ -31,7 +32,7 @@ esp component install nordesems/esp-captive-portal
 
 - Or using `idf.py` component manager:
 ```
-idf.py add-dependency "nordesems/esp-captive-portal^1.0.0"
+idf.py add-dependency "nordesems/esp-captive-portal^1.3.0"
 idf.py update-dependencies
 ```
 
@@ -45,7 +46,7 @@ Add to your `main/idf_component.yml`:
 
 ```yaml
 dependencies:
-  esp-captive-portal: ">=1.0.0"
+  esp-captive-portal: ">=1.3.0"
 ```
 
 Then run:
@@ -101,9 +102,12 @@ captive_portal_register(server, NULL);
 ```
 
 - **`captive_portal_register`** (single-call default):
+  - Applies DHCP Option 114 first (when enabled in Kconfig).
   - Starts DNS lifecycle management automatically (AP start/stop).
   - Tries to register all 11 specific probe URIs.
   - If URI slots are insufficient (common with `HTTPD_DEFAULT_CONFIG()`), rolls back partial probe registration and automatically falls back to a 2-slot `/*` catch-all (GET + HEAD).
+
+DHCP Option 114 and DNS/HTTP probing are complementary and non-conflicting.
 
 > **Why call last?** If fallback catch-all mode is selected, `/*` must stay after your app handlers; otherwise it would intercept application routes.
 
@@ -130,6 +134,7 @@ Pass `NULL` instead of a config pointer to use all Kconfig compile-time defaults
 
 ```
 Component config → Captive Portal
+  ├── Enable DHCP Option 114 captive portal URI      [*]
   ├── Network interface key for IP auto-detection  [WIFI_AP_DEF]
   ├── Fallback redirect IP address                 [192.168.4.1]
   └── Redirect target TCP port                     [80]
@@ -252,6 +257,11 @@ MIT License. See [LICENSE](LICENSE) for details.
 ---
 
 ## Changelog
+
+### 1.3.0 (2026-04-15)
+- Added DHCP Option 114 (RFC 8910) captive portal URI advertisement support
+- Added Kconfig toggle `CAPTIVE_PORTAL_ENABLE_DHCP_OPTION_114` (default: enabled)
+- DHCP Option 114 is now configured before HTTP URI handler registration in all public registration APIs
 
 ### 1.2.0 (2026-04-08)
 - Added automatic registration strategy in `captive_portal_register()`: tries specific probe URIs first, then falls back atomically to catch-all when URI slots are insufficient

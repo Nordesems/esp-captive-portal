@@ -3,11 +3,13 @@
  * @brief Standalone captive portal implementation for ESP-IDF.
  * @author Ahmed Al-Tameemi, Nordes Sp. z o. o.
  *
- * Provides two complementary captive portal mechanisms:
- *   1. HTTP redirect handlers - registers the well-known OS captive-portal
+ * Provides three complementary captive portal mechanisms:
+ *   1. DHCP Option 114 (RFC 8910) - advertises the captive portal URI in
+ *      DHCP offers/acks for clients that support standards-based discovery.
+ *   2. HTTP redirect handlers - registers the well-known OS captive-portal
  *      probe URIs on the application's HTTP server and redirects every probe
  *      to the device's local web interface.
- *   2. DNS server - listens on UDP port 53 and answers all A-record queries
+ *   3. DNS server - listens on UDP port 53 and answers all A-record queries
  *      with the soft-AP IP address, ensuring every DNS lookup performed by a
  *      connected client resolves to the device.
  *
@@ -583,6 +585,64 @@ static void captive_portal_apply_config(const captive_portal_config_t *config)
 }
 
 /**
+ * @brief Configure DHCP Option 114 (RFC 8910) with the portal URI.
+ *
+ * The URI is built from the same effective redirect configuration used by the
+ * HTTP redirect handler.  This keeps DHCP and HTTP announcements consistent.
+ *
+ * DHCP option updates are applied by briefly restarting the DHCP server on the
+ * selected netif.  Stop/start errors are logged and tolerated where possible,
+ * while option-set failure is returned to the caller.
+ *
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE if netif is unavailable,
+ *         or an esp_err_t from esp_netif_dhcps_option on failure.
+ */
+static esp_err_t captive_portal_set_dhcp_option_114(void)
+{
+#if CONFIG_CAPTIVE_PORTAL_ENABLE_DHCP_OPTION_114
+    char captive_uri[128];
+    build_redirect_url(captive_uri, sizeof(captive_uri));
+
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey(s_cfg.netif_key);
+    if (netif == NULL) {
+        ESP_LOGW(TAG, "DHCP Option 114 skipped: netif '%s' not found", s_cfg.netif_key);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Restart DHCP server to ensure the option is reloaded with fresh value. */
+    esp_err_t stop_err = esp_netif_dhcps_stop(netif);
+    if (stop_err != ESP_OK) {
+        ESP_LOGW(TAG, "DHCP server stop before Option 114 returned: %s",
+                 esp_err_to_name(stop_err));
+    }
+
+    esp_err_t opt_err = esp_netif_dhcps_option(netif,
+                                               ESP_NETIF_OP_SET,
+                                               ESP_NETIF_CAPTIVEPORTAL_URI,
+                                               captive_uri,
+                                               strlen(captive_uri));
+    if (opt_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set DHCP Option 114 URI '%s': %s",
+                 captive_uri, esp_err_to_name(opt_err));
+        /* Best effort: restore DHCP server state even when option update fails. */
+        esp_netif_dhcps_start(netif);
+        return opt_err;
+    }
+
+    esp_err_t start_err = esp_netif_dhcps_start(netif);
+    if (start_err != ESP_OK) {
+        ESP_LOGW(TAG, "DHCP server start after Option 114 returned: %s",
+                 esp_err_to_name(start_err));
+    }
+
+    ESP_LOGI(TAG, "DHCP Option 114 set to '%s'", captive_uri);
+    return ESP_OK;
+#else
+    return ESP_OK;
+#endif
+}
+
+/**
  * @brief Register Wi-Fi AP event handlers and start the DNS server if the AP
  *        interface is already up.
  *
@@ -620,7 +680,8 @@ static void captive_portal_enable_dns(void)
  * @brief Register all specific captive-portal probe URIs and start DNS (advanced API).
  *
  * Registers the complete set of 11 OS captive-portal detection endpoints
- * individually, applies configuration, and enables automatic DNS lifecycle
+ * individually, applies configuration, applies DHCP Option 114 (if enabled),
+ * and enables automatic DNS lifecycle
  * management (Wi-Fi AP start/stop events + immediate start if the AP is
  * already up).
  *
@@ -648,6 +709,7 @@ esp_err_t captive_portal_register_uris(httpd_handle_t server,
     }
 
     captive_portal_apply_config(config);
+    captive_portal_set_dhcp_option_114();
 
     for (size_t i = 0; i < NUM_PORTAL_URIS; i++) {
         esp_err_t err = httpd_register_uri_handler(server, &s_portal_uris[i]);
@@ -716,8 +778,8 @@ static esp_err_t captive_portal_register_catchall_http(httpd_handle_t server)
 /**
  * @brief Register wildcard catch-all URI handlers and start DNS (advanced API).
  *
- * Registers @c /\* handlers for GET and HEAD, applies configuration, and
- * enables automatic DNS lifecycle management (Wi-Fi AP start/stop events +
+ * Registers @c /\* handlers for GET and HEAD, applies configuration, applies
+ * DHCP Option 114 (if enabled), and enables automatic DNS lifecycle management (Wi-Fi AP start/stop events +
  * immediate start if the AP is already up).
  *
  * Requests not matched by any previously registered handler are redirected to
@@ -747,6 +809,7 @@ esp_err_t captive_portal_register_catchall(httpd_handle_t server,
     }
 
     captive_portal_apply_config(config);
+    captive_portal_set_dhcp_option_114();
 
     esp_err_t ret = captive_portal_register_catchall_http(server);
     if (ret != ESP_OK) {
@@ -845,9 +908,10 @@ static esp_err_t captive_portal_register_http(httpd_handle_t server)
 /**
  * @brief Register the captive portal using automatic HTTP strategy selection.
  *
- * Applies runtime configuration, selects either specific URI mode or
- * catch-all mode based on available handler slots, then enables automatic DNS
- * lifecycle management tied to Wi-Fi AP start/stop events.
+ * Applies runtime configuration, applies DHCP Option 114 (if enabled),
+ * selects either specific URI mode or catch-all mode based on available
+ * handler slots, then enables automatic DNS lifecycle management tied to
+ * Wi-Fi AP start/stop events.
  *
  * Expected call order is after all application URI handlers are registered.
  * This ensures that, when fallback catch-all mode is selected, the wildcard
@@ -872,6 +936,7 @@ esp_err_t captive_portal_register(httpd_handle_t server,
     }
 
     captive_portal_apply_config(config);
+    captive_portal_set_dhcp_option_114();
 
     esp_err_t result = captive_portal_register_http(server);
     if (result != ESP_OK) {

@@ -1,5 +1,22 @@
 menu "Captive Portal"
 
+    config CAPTIVE_PORTAL_ENABLE_DHCP_OPTION_114
+        bool "Enable DHCP Option 114 captive portal URI"
+        default y
+        help
+            Enables advertising the captive portal URI through DHCP option 114
+            (RFC 8910) on the soft-AP DHCP server.
+
+            The URI value is derived from the same effective redirect target used
+            by HTTP redirects:
+              1) captive_portal_config_t.redirect_url (if set), otherwise
+              2) dynamic IP from CAPTIVE_PORTAL_NETIF_KEY with redirect port,
+                 with CAPTIVE_PORTAL_FALLBACK_IP as fallback.
+
+            The component applies this option before registering HTTP URI
+            handlers so DHCP-aware clients can discover the portal as early as
+            possible.
+
     config CAPTIVE_PORTAL_NETIF_KEY
         string "Network interface key for IP auto-detection"
         default "WIFI_AP_DEF"
