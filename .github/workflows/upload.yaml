@@ -19,7 +19,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Check if component version already exists in registry
+        id: version_check
+        run: |
+          VERSION=$(grep '^version:' idf_component.yml | awk '{print $2}' | tr -d '"' | tr -d "'")
+          echo "Component version: $VERSION"
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://components.espressif.com/api/components/nordesems__esp-captive-portal/versions/${VERSION}/" || echo "000")
+          echo "Registry HTTP status: $HTTP_STATUS"
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "Component version ${VERSION} already exists in the registry. Skipping upload."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "Component version ${VERSION} not found in registry (status: ${HTTP_STATUS}). Proceeding with upload."
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Upload component
+        if: steps.version_check.outputs.skip != 'true'
         uses: espressif/upload-components-ci-action@v2
         with:
           components: "esp-captive-portal: ."
